@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>20 8 12 16</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; background-color: #2c3e50; color: #ecf0f1; overscroll-behavior: none; }
+        #game-area { display: flex; gap: 20px; align-items: flex-start; }
+        #arena-container { border: 2px solid #7f8c8d; background-color: #34495e; position: relative; }
+        #arena-svg { display: block; }
+        .grid-line { stroke: #4a6178; stroke-width: 1; }
+        .dragon-icon { font-size: 2em; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+        .side-icon-text { font-size: 1em; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+        .hitbox-circle { fill: rgba(255, 0, 0, 0.15); stroke: rgba(255, 100, 100, 0.4); stroke-width: 2; pointer-events: none; }
+        .safe-spot-square { fill: rgba(255, 105, 180, 0.3); pointer-events: none; }
+        .character-avatar-group { transition: transform 0.20s linear; }
+        .character-avatar { stroke: #000; stroke-width: 1.5; cursor: pointer; }
+        .character-avatar.player-controlled { stroke: #f1c40f; stroke-width: 3; }
+        .character-text { text-anchor: middle; dominant-baseline: central; fill: white; font-weight: bold; font-size: 0.7em; pointer-events: none; }
+        #ui-controls { display: flex; flex-direction: column; gap: 15px; width: 280px; padding: 15px; background-color: #34495e; border: 1px solid #7f8c8d; border-radius: 8px;}
+        #game-timer-display, #player-debuff-display, #message-display { font-size: 1.2em; padding: 10px; background-color: #2c3e50; border-radius: 4px; text-align: center; }
+        #message-display { min-height: 40px; font-weight: bold; }
+        #message-display.success { color: #2ecc71; }
+        #message-display.failure { color: #e74c3c; }
+        button { padding: 12px 18px; font-size: 1em; background-color: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #2ecc71; }
+        button:disabled { background-color: #7f8c8d; cursor: not-allowed; }
+        .screen-flash { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255, 255, 255, 0.7); z-index: 1000; opacity: 0; pointer-events: none; animation: fadeOutAnimation 0.5s forwards; }
+        /* Ptera flash CSS removed as it's now SVG based */
+        @keyframes fadeOutAnimation { from { opacity: 1; } to { opacity: 0; } }
+        .debug-info { font-size: 0.8em; color: #bdc3c7; margin-top: 10px; max-height: 100px; overflow-y: auto;}
+    </style>
+</head>
+<body>
+    <h1>20 8 12 16</h1>
+    <div id="game-area">
+        <div id="arena-container">
+            <svg id="arena-svg"></svg>
+        </div>
+        <div id="ui-controls">
+            <h2>Game Status</h2>
+            <div id="game-timer-display">Time: 0s</div>
+            <div id="player-debuff-display">Your Debuff: N/A</div>
+            <div id="message-display">Click a character on the grid to start.</div>
+            <button id="start-reset-button" disabled>Play Again</button>
+            <div class="debug-info" id="debug-info-area">Debug: </div>
+        </div>
+    </div>
+    <div id="screen-flash-container"></div>
+    
+    <script>
+        const SVG_NS = "http://www.w3.org/2000/svg";
+        const GRID_SIZE = 11;
+        const CELL_SIZE = 45; 
+        const DRAGON_HITBOX_RADIUS_CELLS = 3;
+        const GAME_TICK_MS = 250; 
+        const TICKS_PER_SECOND = 1000 / GAME_TICK_MS;
+
+        const CHARACTER_SETUP = [ { id: "T1", role: "Tank", letter: "T", num: 1, color: "dodgerblue" }, { id: "M2", role: "Melee", letter: "M", num: 2, color: "crimson" }, { id: "H2", role: "Healer", letter: "H", num: 2, color: "limegreen" }, { id: "R2", role: "Ranged", letter: "R", num: 2, color: "crimson" }, { id: "T2", role: "Tank", letter: "T", num: 2, color: "dodgerblue" }, { id: "R1", role: "Ranged", letter: "R", num: 1, color: "crimson" }, { id: "H1", role: "Healer", letter: "H", num: 1, color: "limegreen" }, { id: "M1", role: "Melee", letter: "M", num: 1, color: "crimson" }, ];
+        const POSSIBLE_TIMERS = [20, 16, 12, 8];
+        const SOAK_ORDER = [20, 8, 12, 16]; 
+        const DEBUFF_TYPES_DATA = { wing: { name: "Wing", color: "mediumseagreen" }, snake: { name: "Snake", color: "mediumpurple" } };
+        const SAFE_SPOT_COORDS_RAW = { "11:15": { x: 2, y: 2 }, "12:45": { x: 8, y: 2 }, "9:45":  { x: 1, y: 4 }, "2:15":  { x: 9, y: 4 }, "8:15":  { x: 1, y: 6 }, "3:45":  { x: 9, y: 6 }, "6:45":  { x: 2, y: 8 }, "5:15":  { x: 8, y: 8 } };
+        const TIMER_TO_SPOT_ORDER = [20, 8, 12, 16];
+
+        const arenaSvg = document.getElementById("arena-svg");
+        const gameTimerDisplay = document.getElementById("game-timer-display");
+        const playerDebuffDisplay = document.getElementById("player-debuff-display");
+        const messageDisplay = document.getElementById("message-display");
+        const startResetButton = document.getElementById("start-reset-button");
+        const screenFlashContainer = document.getElementById("screen-flash-container");
+        const debugInfoArea = document.getElementById("debug-info-area");
+
+        let characters = [];
+        let dragonGridPos = { x: 5, y: 5 }; 
+        let dragonSvgCenter = { x: (dragonGridPos.x + 0.5) * CELL_SIZE, y: (dragonGridPos.y + 0.5) * CELL_SIZE };
+        let dragonCoreCells = [{x: dragonGridPos.x, y: dragonGridPos.y}]; 
+        let snakeSideIsLeft = true;
+        let clockSpotElements = []; 
+        let playerControlledId = null;
+        let gameTickCounter = 0; 
+        let trueGameSeconds = 0; 
+        let gameLoopInterval = null;
+        let scheduledActions = [];
+        let roundActive = false;
+        let gameOverState = false;
+        let charactersHitByCachexiaThisRound = {}; 
+
+        function initArena() { arenaSvg.setAttribute("width", GRID_SIZE * CELL_SIZE); arenaSvg.setAttribute("height", GRID_SIZE * CELL_SIZE); arenaSvg.innerHTML = ''; for (let i = 0; i <= GRID_SIZE; i++) { ["line", "line"].forEach((type, j) => { const line = document.createElementNS(SVG_NS, type); line.setAttribute(j === 0 ? "x1" : "y1", 0); line.setAttribute(j === 0 ? "y1" : "x1", i * CELL_SIZE); line.setAttribute(j === 0 ? "x2" : "y2", GRID_SIZE * CELL_SIZE); line.setAttribute(j === 0 ? "y2" : "x2", i * CELL_SIZE); line.setAttribute("class", "grid-line"); arenaSvg.appendChild(line); }); } const dragonIconElement = document.createElementNS(SVG_NS, "text"); dragonIconElement.setAttribute("x", dragonSvgCenter.x); dragonIconElement.setAttribute("y", dragonSvgCenter.y); dragonIconElement.setAttribute("font-size", `${CELL_SIZE * 1.8}px`); dragonIconElement.setAttribute("class", "dragon-icon"); dragonIconElement.textContent = "🐲"; arenaSvg.appendChild(dragonIconElement); const hitboxCircle = document.createElementNS(SVG_NS, "circle"); hitboxCircle.setAttribute("cx", dragonSvgCenter.x); hitboxCircle.setAttribute("cy", dragonSvgCenter.y); hitboxCircle.setAttribute("r", DRAGON_HITBOX_RADIUS_CELLS * CELL_SIZE); hitboxCircle.setAttribute("class", "hitbox-circle"); arenaSvg.appendChild(hitboxCircle); }
+        function initSideIcons() { arenaSvg.querySelectorAll(".side-icon-text").forEach(icon => icon.remove()); const wingIconText = "🕊️"; const snakeIconText = "🐍"; const wingCellX = dragonGridPos.x + (snakeSideIsLeft ? 1 : -1); const snakeCellX = dragonGridPos.x + (snakeSideIsLeft ? -1 : 1); const wingSvgX = (wingCellX + 0.5) * CELL_SIZE; const snakeSvgX = (snakeCellX + 0.5) * CELL_SIZE; const iconSvgY = dragonSvgCenter.y; [{ text: wingIconText, x: wingSvgX, y: iconSvgY}, { text: snakeIconText, x: snakeSvgX, y: iconSvgY}].forEach(iconData => { const icon = document.createElementNS(SVG_NS, "text"); icon.setAttribute("x", iconData.x); icon.setAttribute("y", iconData.y); icon.setAttribute("font-size", `${CELL_SIZE * 1.0}px`); icon.setAttribute("class", "side-icon-text"); icon.textContent = iconData.text; arenaSvg.appendChild(icon); }); }
+        function createCharacters() { characters = []; const numChars = CHARACTER_SETUP.length; const radiusFromCenterCell = 3.5; const centerGrid = { x: dragonGridPos.x, y: dragonGridPos.y }; CHARACTER_SETUP.forEach((setup, i) => { const angle = (i / numChars) * 2 * Math.PI - Math.PI / 2; const rawX = centerGrid.x + radiusFromCenterCell * Math.cos(angle); const rawY = centerGrid.y + radiusFromCenterCell * Math.sin(angle); const initialX = clamp(Math.round(rawX), 0, GRID_SIZE - 1); const initialY = clamp(Math.round(rawY), 0, GRID_SIZE - 1); const char = { ...setup, x: initialX, y: initialY, targetX: initialX, targetY: initialY, initialX: initialX, initialY: initialY, debuffTimer: null, debuffType: null, clockSpotCoords: null, soakSpotCoords: null, isPlayerControlled: false, svgElements: {}, }; const avatarGroup = document.createElementNS(SVG_NS, "g"); avatarGroup.classList.add("character-avatar-group"); const avatarCircle = document.createElementNS(SVG_NS, "circle"); avatarCircle.setAttribute("r", CELL_SIZE * 0.4); avatarCircle.setAttribute("fill", char.color); avatarCircle.setAttribute("class", "character-avatar"); avatarCircle.addEventListener("click", () => handleCharacterClick(char.id)); const avatarText = document.createElementNS(SVG_NS, "text"); avatarText.textContent = `${char.letter}${char.num}`; avatarText.setAttribute("class", "character-text"); avatarText.setAttribute("font-size", `${CELL_SIZE * 0.3}px`); avatarGroup.appendChild(avatarCircle); avatarGroup.appendChild(avatarText); char.svgElements = { group: avatarGroup, circle: avatarCircle, text: avatarText }; arenaSvg.appendChild(avatarGroup); characters.push(char); }); renderCharacters(); }
+        function assignDebuffsAndClockSpots() { snakeSideIsLeft = Math.random() < 0.5; initSideIcons(); let allDebuffCombinations = []; POSSIBLE_TIMERS.forEach(timer => { Object.keys(DEBUFF_TYPES_DATA).forEach(type => { allDebuffCombinations.push({ timer, type }); }); }); allDebuffCombinations = shuffleArray(allDebuffCombinations); characters.forEach((char, index) => { char.debuffTimer = allDebuffCombinations[index].timer; char.debuffType = allDebuffCombinations[index].type; calculateClockAndSoakSpot(char); if (char.isPlayerControlled) { const debuffData = DEBUFF_TYPES_DATA[char.debuffType]; playerDebuffDisplay.textContent = `Your Debuff: ${char.debuffTimer}s ${debuffData.name}`; playerDebuffDisplay.style.color = debuffData.color; } }); drawAllClockSpots(); }
+        function calculateClockAndSoakSpot(char) { const targetSideForClockSpot = char.debuffType === 'wing' ? 'snake' : 'wing'; const spotsOnTargetSide = []; Object.entries(SAFE_SPOT_COORDS_RAW).forEach(([clock, coords]) => { let sideOfSpot; if (coords.x < dragonGridPos.x) sideOfSpot = 'snake'; else if (coords.x > dragonGridPos.x) sideOfSpot = 'wing'; else sideOfSpot = 'center'; const actualSideName = snakeSideIsLeft ? sideOfSpot : (sideOfSpot === 'snake' ? 'wing' : (sideOfSpot === 'wing' ? 'snake' : 'center')); if (actualSideName === targetSideForClockSpot) { spotsOnTargetSide.push({ ...coords, clock }); } }); spotsOnTargetSide.sort((a, b) => { if (a.y !== b.y) return a.y - b.y; return a.x - b.x; }); const timerIndex = TIMER_TO_SPOT_ORDER.indexOf(char.debuffTimer); if (timerIndex !== -1 && spotsOnTargetSide[timerIndex]) { char.clockSpotCoords = { x: spotsOnTargetSide[timerIndex].x, y: spotsOnTargetSide[timerIndex].y }; } else { console.error(`Could not assign clock spot for ${char.id}`, char.debuffTimer, targetSideForClockSpot, spotsOnTargetSide); char.clockSpotCoords = spotsOnTargetSide.length > 0 ? spotsOnTargetSide[0] : {x:0, y:0}; } const dx = Math.sign(dragonGridPos.x - char.clockSpotCoords.x); const dy = Math.sign(dragonGridPos.y - char.clockSpotCoords.y); let soakX = char.clockSpotCoords.x + dx * 1; let soakY = char.clockSpotCoords.y + dy * 1; if (!isCellInHitbox(soakX, soakY) || (soakX === char.clockSpotCoords.x && soakY === char.clockSpotCoords.y) ) { soakX = char.clockSpotCoords.x + dx * 2; soakY = char.clockSpotCoords.y + dy * 2; } soakX = clamp(soakX, 0, GRID_SIZE -1); soakY = clamp(soakY, 0, GRID_SIZE -1); if (!isCellInHitbox(soakX, soakY) || (soakX === dragonGridPos.x && soakY === dragonGridPos.y)) { let closestDist = Infinity; let bestSoakX = soakX, bestSoakY = soakY; for(let r=0; r<GRID_SIZE; r++) { for(let c=0; c<GRID_SIZE; c++) { if(isCellInHitbox(c,r) && !(c === dragonGridPos.x && r === dragonGridPos.y)) { const dist = Math.hypot(c-char.clockSpotCoords.x, r-char.clockSpotCoords.y); if(dist < closestDist) { closestDist = dist; bestSoakX = c; bestSoakY = r; } } } } soakX = bestSoakX; soakY = bestSoakY; if (!isCellInHitbox(soakX, soakY) || (soakX === dragonGridPos.x && soakY === dragonGridPos.y)) { console.warn("Could not find valid non-dragon soak spot for", char.id, "defaulting near dragon."); soakX = clamp(dragonGridPos.x + (dragonGridPos.x > GRID_SIZE/2 ? -1 : 1) ,0 , GRID_SIZE-1); if(soakX === dragonGridPos.x) soakX = clamp(dragonGridPos.x + (dragonGridPos.x > GRID_SIZE/2 ? -2 : 2) ,0 , GRID_SIZE-1); soakY = dragonGridPos.y; } } char.soakSpotCoords = { x: soakX, y: soakY }; }
+        
+        function setupScheduledActions() {
+            scheduledActions = [];
+            charactersHitByCachexiaThisRound = {}; 
+            const cachexiaTimes = [8, 12, 16, 20]; 
+
+            cachexiaTimes.forEach((attackTime, index) => {
+                scheduledActions.push({ time: attackTime, type: 'CACHEXIA_WARN', attackNumber: index + 1 });
+                scheduledActions.push({ time: attackTime, type: 'CACHEXIA_EXECUTE', attackNumber: index + 1 });
+                characters.forEach(char => {
+                    if (char.debuffTimer === attackTime) {
+                        scheduledActions.push({ time: attackTime, type: 'DEBUFF_EXPLOSION', charId: char.id, timerValue: char.debuffTimer });
+                    }
+                });
+                const soakerGroupForThisAttack = SOAK_ORDER[index]; 
+                const nextSoakerGroup = (index < SOAK_ORDER.length - 1) ? SOAK_ORDER[index+1] : null;
+                scheduledActions.push({ time: attackTime + 0.5 / TICKS_PER_SECOND, type: 'NPC_MOVE_AFTER_ATTACK', outTimer: soakerGroupForThisAttack, inTimer: nextSoakerGroup });
+            });
+            
+            const lastAttackTime = cachexiaTimes[cachexiaTimes.length - 1];
+            scheduledActions.push({ time: lastAttackTime + (1.5 / TICKS_PER_SECOND), type: 'UPDATE_MESSAGE', text: "Ptera Ixou Incoming!", messageType: "warning" });
+            scheduledActions.push({ time: lastAttackTime + 1.0 / TICKS_PER_SECOND, type: 'NPC_MOVE_FOR_PTERA'});
+
+            const pteraTime = lastAttackTime + 4; 
+            scheduledActions.push({ time: pteraTime, type: 'PTERA_IXOU_WARN' });
+            scheduledActions.push({ time: pteraTime, type: 'PTERA_IXOU_EXECUTE' });
+            scheduledActions.push({ time: pteraTime + 0.5, type: 'ROUND_SUCCESS_CHECK' });
+
+            scheduledActions.sort((a, b) => {
+                if (a.time !== b.time) return a.time - b.time;
+                const priority = {'CACHEXIA_WARN': 0, 'CACHEXIA_EXECUTE': 1, 'DEBUFF_EXPLOSION': 2, 'NPC_MOVE_AFTER_ATTACK': 3, 'UPDATE_MESSAGE': 3.5, 'NPC_MOVE_FOR_PTERA': 4, 'PTERA_IXOU_WARN': 5, 'PTERA_IXOU_EXECUTE': 6, 'ROUND_SUCCESS_CHECK': 7};
+                const priorityA = priority[a.type] || 99;
+                const priorityB = priority[b.type] || 99;
+                return priorityA - priorityB;
+            });
+        }
+
+        function executeAction(action) { 
+            switch (action.type) { 
+                case 'CACHEXIA_WARN': updateMessage(`Cachexia Incoming! (${action.time}s)`, "warning"); break; 
+                case 'CACHEXIA_EXECUTE': performScreenFlash("main"); checkCachexiaSurvival(action.attackNumber); break; 
+                case 'NPC_MOVE_AFTER_ATTACK': characters.filter(c => !c.isPlayerControlled).forEach(npc => { if (action.outTimer && npc.debuffTimer === action.outTimer) { initiateNpcMove(npc, npc.clockSpotCoords.x, npc.clockSpotCoords.y); } if (action.inTimer && npc.debuffTimer === action.inTimer) { initiateNpcMove(npc, npc.soakSpotCoords.x, npc.soakSpotCoords.y); } }); break; 
+                case 'NPC_MOVE_FOR_PTERA': characters.filter(c => !c.isPlayerControlled).forEach(npc => { const requiredSideForPtera = npc.debuffType; const currentActualSide = getCharacterActualSide(npc.x); if (currentActualSide !== requiredSideForPtera) { let targetPteraX = npc.x; if (snakeSideIsLeft) { if (requiredSideForPtera === 'snake') targetPteraX = dragonGridPos.x - 2; else if (requiredSideForPtera === 'wing') targetPteraX = dragonGridPos.x + 2; } else { if (requiredSideForPtera === 'wing') targetPteraX = dragonGridPos.x - 2; else if (requiredSideForPtera === 'snake') targetPteraX = dragonGridPos.x + 2; } initiateNpcMove(npc, clamp(targetPteraX, 0, GRID_SIZE-1), npc.y); } }); break; 
+                case 'UPDATE_MESSAGE': if (action.text && action.messageType) { updateMessage(action.text, action.messageType); } else if (action.text) { updateMessage(action.text); } break;
+                case 'PTERA_IXOU_WARN': updateMessage("Ptera Ixou Incoming!", "warning"); break; 
+                case 'PTERA_IXOU_EXECUTE': performPteraFlash(); checkPteraIxouSurvival(); break; 
+                case 'ROUND_SUCCESS_CHECK': if (!gameOverState) { gameOver("Round Successful! Everyone Survived!", true); } break; 
+                case 'DEBUFF_EXPLOSION': const explodingChar = characters.find(c => c.id === action.charId); if (explodingChar && !gameOverState) { performDebuffExplosionEffect(explodingChar); updateMessage(`${explodingChar.id}'s ${action.timerValue}s debuff explodes!`, "warning"); characters.forEach(otherChar => { if (otherChar.id === explodingChar.id) return; const dx = Math.abs(explodingChar.x - otherChar.x); const dy = Math.abs(explodingChar.y - otherChar.y); if (dx <= 1 && dy <= 1) { if (!gameOverState) { gameOver(`Failure: ${otherChar.id} was caught in ${explodingChar.id}'s debuff explosion!`, false); } } }); } break; 
+            } 
+        }
+        
+        function performDebuffExplosionEffect(char) { 
+            const explosionCircle = document.createElementNS(SVG_NS, "circle"); 
+            const svgX = (char.x + 0.5) * CELL_SIZE; 
+            const svgY = (char.y + 0.5) * CELL_SIZE; 
+            explosionCircle.setAttribute("cx", svgX); 
+            explosionCircle.setAttribute("cy", svgY); 
+            explosionCircle.setAttribute("r", CELL_SIZE * 0.1); 
+            explosionCircle.setAttribute("fill", "none"); 
+            explosionCircle.setAttribute("stroke", "red"); 
+            explosionCircle.setAttribute("stroke-width", "3"); 
+            explosionCircle.style.opacity = "1"; 
+            arenaSvg.appendChild(explosionCircle); 
+            let radius = parseFloat(explosionCircle.getAttribute("r")); 
+            const maxRadius = CELL_SIZE * 0.6; 
+            let currentOpacity = 1; 
+            const animInterval = setInterval(() => { 
+                radius += CELL_SIZE * 0.05; 
+                currentOpacity -= 0.05; 
+                explosionCircle.setAttribute("r", radius); 
+                explosionCircle.style.opacity = Math.max(0, currentOpacity).toString(); 
+                if (currentOpacity <= 0 || radius >= maxRadius) { 
+                    clearInterval(animInterval); 
+                    if (explosionCircle.parentNode) { explosionCircle.remove(); } 
+                } 
+            }, 25); 
+        }
+        
+        function performPteraFlash() {
+            arenaSvg.querySelectorAll(".ptera-flash-rect").forEach(rect => rect.remove()); // Clear previous
+            const totalSvgWidth = GRID_SIZE * CELL_SIZE;
+            const totalSvgHeight = GRID_SIZE * CELL_SIZE;
+            const midPointX = dragonSvgCenter.x; 
+            const snakeColor = "rgba(0, 255, 0, 0.5)";
+            const wingColor = "rgba(128, 0, 128, 0.5)";
+            const rect1 = document.createElementNS(SVG_NS, "rect");
+            rect1.setAttribute("y", 0); rect1.setAttribute("height", totalSvgHeight);
+            rect1.setAttribute("class", "ptera-flash-rect"); rect1.style.opacity = 0;
+            const rect2 = document.createElementNS(SVG_NS, "rect");
+            rect2.setAttribute("y", 0); rect2.setAttribute("height", totalSvgHeight);
+            rect2.setAttribute("class", "ptera-flash-rect"); rect2.style.opacity = 0;
+
+            if (snakeSideIsLeft) {
+                rect1.setAttribute("x", 0); rect1.setAttribute("width", midPointX); rect1.setAttribute("fill", snakeColor);
+                rect2.setAttribute("x", midPointX); rect2.setAttribute("width", totalSvgWidth - midPointX); rect2.setAttribute("fill", wingColor);
+            } else { 
+                rect1.setAttribute("x", 0); rect1.setAttribute("width", midPointX); rect1.setAttribute("fill", wingColor);
+                rect2.setAttribute("x", midPointX); rect2.setAttribute("width", totalSvgWidth - midPointX); rect2.setAttribute("fill", snakeColor);
+            }
+            arenaSvg.appendChild(rect1); arenaSvg.appendChild(rect2);
+            
+            let targetOpacity = 0.6; // Max opacity for the flash
+            let currentOpacity = 0;
+            let fadeInSpeed = 0.15; 
+            let fadeOutSpeed = 0.04; 
+            let fadingIn = true;
+
+            requestAnimationFrame(() => {
+                const fadeInterval = setInterval(() => {
+                    if (fadingIn) {
+                        currentOpacity += fadeInSpeed;
+                        if (currentOpacity >= targetOpacity) { currentOpacity = targetOpacity; fadingIn = false; }
+                    } else { 
+                        currentOpacity -= fadeOutSpeed;
+                        if (currentOpacity <= 0) { currentOpacity = 0; clearInterval(fadeInterval); rect1.remove(); rect2.remove(); }
+                    }
+                    rect1.style.opacity = currentOpacity; rect2.style.opacity = currentOpacity;
+                }, 30); 
+            });
+        }
+
+        function selectPlayerCharacter(charId) { if (roundActive || gameOverState) return; playerControlledId = charId; characters.forEach(c => { c.isPlayerControlled = (c.id === charId); c.svgElements.circle.classList.toggle("player-controlled", c.isPlayerControlled); }); startNewRound(); }
+        function npcInitialMovement() { characters.filter(c => !c.isPlayerControlled).forEach(npc => { if (npc.debuffTimer === SOAK_ORDER[0]) { initiateNpcMove(npc, npc.soakSpotCoords.x, npc.soakSpotCoords.y); } else { initiateNpcMove(npc, npc.clockSpotCoords.x, npc.clockSpotCoords.y); } }); }
+        function gameTick() { if (!roundActive || gameOverState) return; gameTickCounter++; if (gameTickCounter % TICKS_PER_SECOND === 0 || gameTickCounter === 1) { trueGameSeconds = Math.floor(gameTickCounter / TICKS_PER_SECOND); gameTimerDisplay.textContent = `Time: ${trueGameSeconds}s`; while (scheduledActions.length > 0 && scheduledActions[0].time <= trueGameSeconds) { const action = scheduledActions.shift(); executeAction(action); if (gameOverState) break; } } updateNpcMovement(); renderCharacters(); debugInfoArea.textContent = `Sec: ${trueGameSeconds} | Tick: ${gameTickCounter} | Player: ${playerControlledId ? characters.find(c=>c.id===playerControlledId).x + "," + characters.find(c=>c.id===playerControlledId).y : 'N/A'}`; }
+        function initiateNpcMove(npc, targetX, targetY) { npc.targetX = targetX; npc.targetY = targetY; }
+        function checkCachexiaSurvival(attackNumber) { let charactersInHitbox = []; let charactersNotInHitboxSafe = true; characters.forEach(char => { if (isCellInHitbox(char.x, char.y)) { charactersInHitbox.push(char); } else { if (char.x !== char.clockSpotCoords.x || char.y !== char.clockSpotCoords.y) { charactersNotInHitboxSafe = false; if (!gameOverState) gameOver(`Failure: ${char.id} was not in their clock spot during Cachexia!`, false); console.log(`${char.id} expected clock spot: ${char.clockSpotCoords.x},${char.clockSpotCoords.y} but was at ${char.x},${char.y}`); } } }); if (gameOverState) return; if (charactersInHitbox.length !== 2) { gameOver(`Failure: Expected 2 in hitbox for Cachexia, found ${charactersInHitbox.length}!`, false); return; } charactersInHitbox.forEach(char => { charactersHitByCachexiaThisRound[char.id] = (charactersHitByCachexiaThisRound[char.id] || 0) + 1; if (charactersHitByCachexiaThisRound[char.id] > 1) { if (!gameOverState) gameOver(`Failure: ${char.id} hit by Cachexia more than once!`, false); } }); if (!gameOverState) updateMessage(`Cachexia Resolved.`, "info"); }
+        function checkPteraIxouSurvival() { characters.forEach(char => { const charSide = getCharacterActualSide(char.x); const requiredSide = char.debuffType; if (charSide !== requiredSide) { if (!gameOverState) gameOver(`Failure: ${char.id} (${char.debuffType} debuff) was on ${charSide} side for Ptera Ixou! Required ${requiredSide}.`, false); } }); if (!gameOverState) updateMessage("Ptera Ixou Resolved.", "info"); }
+        function handlePlayerMove(dx, dy) { if (!roundActive || gameOverState || !playerControlledId) return; const player = characters.find(c => c.id === playerControlledId); if (!player) return; const newX = clamp(player.x + dx, 0, GRID_SIZE - 1); const newY = clamp(player.y + dy, 0, GRID_SIZE - 1); const isDragonCell = (newX === dragonCoreCells[0].x && newY === dragonCoreCells[0].y); if (isDragonCell) return; player.x = newX; player.y = newY; player.targetX = newX; player.targetY = newY; }
+        function renderCharacters() { characters.forEach(char => { if (typeof char.x !== 'number' || typeof char.y !== 'number' || typeof CELL_SIZE !== 'number') { console.error("Invalid values for renderCharacters:", char.id, char.x, char.y, CELL_SIZE); return; } const group = char.svgElements.group; const newTranslateX = (char.x * CELL_SIZE) + CELL_SIZE / 2; const newTranslateY = (char.y * CELL_SIZE) + CELL_SIZE / 2; if (isNaN(newTranslateX) || isNaN(newTranslateY)) { console.error("NaN detected in transform for char:", char.id, "Calculated X:", newTranslateX, "Calculated Y:", newTranslateY, "Base x/y:", char.x, char.y); return; } group.setAttribute("transform", `translate(${newTranslateX}, ${newTranslateY})`); }); }
+        function drawAllClockSpots() { clockSpotElements.forEach(el => el.remove()); clockSpotElements = []; characters.forEach(char => { if (char.clockSpotCoords) { const rect = document.createElementNS(SVG_NS, "rect"); rect.setAttribute("x", char.clockSpotCoords.x * CELL_SIZE); rect.setAttribute("y", char.clockSpotCoords.y * CELL_SIZE); rect.setAttribute("width", CELL_SIZE); rect.setAttribute("height", CELL_SIZE); rect.setAttribute("class", "safe-spot-square"); arenaSvg.appendChild(rect); clockSpotElements.push(rect); } }); }
+        function clamp(value, min, max) { return Math.min(Math.max(value, min), max); }
+        function shuffleArray(array) { for (let i = array.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [array[i], array[j]] = [array[j], array[i]];} return array;}
+        function isCellInHitbox(cellX, cellY) { const cellSvgCenterX = (cellX + 0.5) * CELL_SIZE; const cellSvgCenterY = (cellY + 0.5) * CELL_SIZE; const dist = Math.hypot(cellSvgCenterX - dragonSvgCenter.x, cellSvgCenterY - dragonSvgCenter.y); return dist < (DRAGON_HITBOX_RADIUS_CELLS * CELL_SIZE); }
+        function getCharacterActualSide(charGridX) { let side; if (charGridX < dragonGridPos.x) side = 'left_of_dragon'; else if (charGridX > dragonGridPos.x) side = 'right_of_dragon'; else side = 'dragon_column'; if (side === 'dragon_column') { return snakeSideIsLeft ? 'wing' : 'snake'; } if (snakeSideIsLeft) { return (side === 'left_of_dragon') ? 'snake' : 'wing'; } else { return (side === 'left_of_dragon') ? 'wing' : 'snake'; } }
+        function getContrastColor(hexcolor){ if (hexcolor.slice(0, 1) === '#') { hexcolor = hexcolor.slice(1); } if (hexcolor.length === 3) { hexcolor = hexcolor.split('').map(function (hex) { return hex + hex; }).join(''); } const r = parseInt(hexcolor.substr(0,2),16); const g = parseInt(hexcolor.substr(2,2),16); const b = parseInt(hexcolor.substr(4,2),16); const yiq = ((r*299)+(g*587)+(b*114))/1000; return (yiq >= 128) ? '#333333' : '#ffffff'; }
+        function updateMessage(text, type = "info") { messageDisplay.textContent = text; messageDisplay.className = ""; if (type === "success") messageDisplay.classList.add("success"); else if (type === "failure") messageDisplay.classList.add("failure"); else if (type === "warning") messageDisplay.style.color = "#f39c12"; else messageDisplay.style.color = "#ecf0f1"; }
+        function gameOver(message, success) { if (gameOverState && !success) return; gameOverState = true; roundActive = false; if (gameLoopInterval) clearInterval(gameLoopInterval); updateMessage(message, success ? "success" : "failure"); startResetButton.textContent = "Play Again"; startResetButton.disabled = false; scheduledActions = []; }
+        function startNewRound() { if (!playerControlledId) { updateMessage("Error: No character selected.", "failure"); return; } if (gameLoopInterval) clearInterval(gameLoopInterval); gameOverState = false; roundActive = true; gameTickCounter = 0; trueGameSeconds = 0; charactersHitByCachexiaThisRound = {}; gameTimerDisplay.textContent = "Time: 0s"; updateMessage("Round Started! Good luck!", "info"); startResetButton.textContent = "Reset Round"; startResetButton.disabled = false; characters.forEach(char => { char.x = char.initialX; char.y = char.initialY; char.targetX = char.initialX; char.targetY = char.initialY; }); assignDebuffsAndClockSpots(); npcInitialMovement(); setupScheduledActions(); renderCharacters(); gameLoopInterval = setInterval(gameTick, GAME_TICK_MS); }
+        function handleCharacterClick(charId) { if (!playerControlledId && !roundActive && !gameOverState) { selectPlayerCharacter(charId); } }
+        startResetButton.addEventListener("click", () => { if (roundActive && !gameOverState) { gameOver("Round Reset by Player.", false); } playerControlledId = null; characters.forEach(c => { c.isPlayerControlled = false; c.svgElements.circle.classList.remove("player-controlled"); c.x = c.initialX; c.y = c.initialY; c.targetX = c.initialX; c.targetY = c.initialY; }); renderCharacters(); updateMessage("Click a character on the grid to start.", "info"); playerDebuffDisplay.textContent = "Your Debuff: N/A"; gameTimerDisplay.textContent = "Time: 0s"; startResetButton.disabled = true; if(gameLoopInterval) clearInterval(gameLoopInterval); roundActive = false; gameOverState = false; clockSpotElements.forEach(el => el.remove()); clockSpotElements = []; arenaSvg.querySelectorAll(".side-icon-text").forEach(icon => icon.remove()); arenaSvg.querySelectorAll(".ptera-flash-rect").forEach(rect => rect.remove()); /* Clear SVG Ptera flash */ });
+        window.addEventListener("keydown", (e) => { if (!roundActive || gameOverState || !playerControlledId) return; if (document.activeElement && ['input', 'textarea', 'button'].includes(document.activeElement.tagName.toLowerCase())) { return; } let dx = 0, dy = 0; switch (e.key.toLowerCase()) { case "w": case "arrowup": dy = -1; break; case "s": case "arrowdown": dy = 1; break; case "a": case "arrowleft": dx = -1; break; case "d": case "arrowright": dx = 1; break; default: return; } e.preventDefault(); handlePlayerMove(dx, dy); });
+        function updateNpcMovement() { characters.filter(c => !c.isPlayerControlled).forEach(npc => { if (npc.x === npc.targetX && npc.y === npc.targetY) { return; } let nextX = npc.x; let nextY = npc.y; const dx = npc.targetX - npc.x; const dy = npc.targetY - npc.y; if (dx !== 0 && dy !== 0) { if (Math.abs(dx) >= Math.abs(dy)) { nextX += Math.sign(dx); } else { nextY += Math.sign(dy); } } else if (dx !== 0) { nextX += Math.sign(dx); } else if (dy !== 0) { nextY += Math.sign(dy); } let isDragonCellTarget = (nextX === dragonCoreCells[0].x && nextY === dragonCoreCells[0].y); if (!isDragonCellTarget) { npc.x = nextX; npc.y = nextY; } else if (dx !== 0 && dy !== 0) { if (Math.abs(dx) >= Math.abs(dy)) { nextX = npc.x; nextY = npc.y + Math.sign(dy); } else { nextX = npc.x + Math.sign(dx); nextY = npc.y; } isDragonCellTarget = (nextX === dragonCoreCells[0].x && nextY === dragonCoreCells[0].y); if (!isDragonCellTarget) { npc.x = nextX; npc.y = nextY; } } }); }
+        function performScreenFlash(type) { if(type === "main") { const flash = document.createElement("div"); flash.className = "screen-flash"; screenFlashContainer.appendChild(flash); setTimeout(() => flash.remove(), 500); } }
+
+        // --- Initial Setup ---
+        initArena(); 
+        createCharacters(); 
+        updateMessage("Click a character on the grid to start.", "info");
+        playerDebuffDisplay.textContent = "Your Debuff: N/A";
+    </script>
+</body>
+</html>
